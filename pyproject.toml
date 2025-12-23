@@ -1,0 +1,13 @@
+[project]
+name = "trainee-telebot"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "aiogram>=3.23.0",
+    "asyncpg>=0.31.0",
+    "ollama>=0.6.1",
+    "python-dotenv>=1.2.1",
+    "sqlalchemy>=2.0.45",
+]
