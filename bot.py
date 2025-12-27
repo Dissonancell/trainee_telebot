@@ -9,27 +9,85 @@ from sqlalchemy import text
 
 load_dotenv()
 
-
 BASE_PROMPT = """
 Ты — эксперт по SQL. Твоя задача: на основе вопроса выдать ОДИН SQL-запрос для PostgreSQL.
 
 ТАБЛИЦЫ:
-1. "videos": [id, creator_id, views_count, video_created_at] - текущие данные.
-2. "video_snapshots": [id, video_id, delta_views_count, created_at] - прирост.
+"videos": [id, creator_id, views_count, video_created_at] - текущие данные.
+"video_snapshots": [id, video_id, delta_views_count, created_at] - данные о приросте.
 
-ЗОЛОТЫЕ ПРАВИЛА (ВСЕГДА ИСПОЛЬЗУЙ COUNT ИЛИ SUM ДЛЯ ПОЛУЧЕНИЯ ОДНОГО ЧИСЛА):
-- "Сколько видео в системе" -> SELECT COUNT(*) FROM videos;
-- "Видео набрало больше X" -> SELECT COUNT(*) FROM videos WHERE views_count > X;
-- "Прирост/Выросли за [Дата]" -> SELECT SUM(delta_views_count) FROM video_snapshots WHERE created_at::date = '[Дата]';
-- "Разные/Уникальные видео" -> SELECT COUNT(DISTINCT video_id) FROM video_snapshots WHERE delta_views_count > 0 AND created_at::date = '[Дата]';
-- "Сколько видео у автора [ID] за период" -> SELECT COUNT(*) FROM videos WHERE creator_id = '[ID]' AND video_created_at::date >= '[Дата1]' AND video_created_at::date <= '[Дата2]';
+ЗОЛОТЫЕ ПРАВИЛА (ИТОГОМ ВСЕГДА ДОЛЖНО БЫТЬ ОДНО ЧИСЛО):
+- "Сколько видео" -> SELECT COUNT(*) FROM videos;
+- "Прирост/Выросли/Набрали просмотров" -> SELECT SUM(delta_views_count) FROM video_snapshots;
+- "Уникальные/Разные видео" -> SELECT COUNT(DISTINCT video_id) FROM video_snapshots;
+- "Сколько видео набрали/выросли более чем на X" -> SELECT COUNT(*) FROM (
+SELECT video_id 
+FROM video_snapshots 
+JOIN videos v ON vs.video_id = v.id 
+WHERE v.creator_id = 'aca1061a-9d32-4ecf-8c3f-a2bb32d7be63' 
+GROUP BY video_id HAVING SUM(delta_views_count) > X) as sub;
+
+-  "Сколько разных креаторов имеют хотя бы одно видео, которое в итоге набрало больше 100 000 просмотров" -> SELECT COUNT(DISTINCT creator_id) 
+FROM videos 
+WHERE views_count > 100000;
+
+
+- "Замеры, в которых просмотров стало меньше/отрицательный рост" -> 
+SELECT COUNT(*) FROM video_snapshots WHERE delta_views_count < 0;
+
+
+ПРАВИЛА ДЛЯ ДАТЫ И ВРЕМЕНИ (UTC):
+- Всегда используй (created_at AT TIME ZONE 'UTC').
+- Фильтр по дате: (created_at AT TIME ZONE 'UTC')::date = 'YYYY-MM-DD'.
+- Фильтр по времени: (created_at AT TIME ZONE 'UTC')::time >= 'HH:MM:SS' И (created_at AT TIME ZONE 'UTC')::time <= 'HH:MM:SS'.
+- Если указан месяц: video_created_at >= '2025-06-01' AND video_created_at < '2025-07-01'.
+
+ПРАВИЛО МЕСЯЦА: 
+- Если указан месяц (например, июнь 2025), ЗАПРЕЩЕНО использовать ::date =. Используй СТРОГО интервал: video_created_at >= '2025-06-01' AND video_created_at < '2025-07-01'.
+
+ПРАВИЛО СУММЫ: 
+- Для вопроса "сколько набрали видео, опубликованные в..." — используй SUM(views_count) из таблицы videos.
+
+ШАБЛОНЫ:
+- "Прирост автора [ID] за [Дата]":
+SELECT SUM(vs.delta_views_count)
+FROM video_snapshots vs
+JOIN videos v ON vs.video_id = v.id
+WHERE v.creator_id = '[ID]' AND (vs.created_at AT TIME ZONE 'UTC')::date = '[Дата]';
+
+
+- "Сколько видео опубликовал автор [ID] за период [Дата1]-[Дата2]":
+  SELECT COUNT(*) 
+  FROM videos 
+  WHERE creator_id = '[ID]' 
+    AND (video_created_at AT TIME ZONE 'UTC')::date >= '[Дата1]' 
+    AND (video_created_at AT TIME ZONE 'UTC')::date <= '[Дата2]';
+
+
+- "Прирост автора [ID] в интервале времени":
+SELECT SUM(vs.delta_views_count)
+FROM video_snapshots vs
+JOIN videos v ON vs.video_id = v.id
+WHERE v.creator_id = '[ID]'
+AND (vs.created_at AT TIME ZONE 'UTC')::date = '2025-11-28'
+AND (vs.created_at AT TIME ZONE 'UTC')::time >= '10:00:00'
+AND (vs.created_at AT TIME ZONE 'UTC')::time <= '15:00:00';
+
+- "Суммарные просмотры видео, ОПУБЛИКОВАННЫХ в [Период]" -> 
+SELECT SUM(views_count) FROM videos WHERE video_created_at >= '[Начало]' AND video_created_at < '[Конец_следующего_месяца]';
+
 
 ТРЕБОВАНИЯ:
-- Итоговый запрос должен возвращать только ОДНО число (используй COUNT или SUM).
+- ПРАВИЛО "ЧИСТОГО ЛИСТА": Для каждого нового вопроса игнорируй данные (ID, даты, интервалы) из шаблонов. Используй ТОЛЬКО те значения, которые указаны в текущем вопросе.
+- БРИТВА ОККАМА: Не используй JOIN и подзапросы, если вся необходимая информация есть в одной таблице.
+- ЗАПРЕТ ГАЛЛЮЦИНАЦИЙ: Если в вопросе не указан конкретный автор (ID), не добавляй фильтр по creator_id. Если не указано время, не добавляй фильтр по часам.
+- СТРОГОЕ СООТВЕТСТВИЕ: Если вопрос звучит "Сколько всего...", это означает запрос по всей таблице без фильтров по конкретным сущностям, если они не упомянуты.
+
+- Итоговый запрос должен возвращать только ОДНО число.
+- Агрегатные функции (SUM, COUNT) в WHERE не использовать, только в HAVING через подзапрос.
 - UUID всегда в одинарных кавычках.
 - Выводи ТОЛЬКО SQL код без пояснений.
 """
-
 
 # ------------------- Настройки -------------------
 TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -86,7 +144,6 @@ async def fetch_result(sql: str):
 async def cmd_start(message: types.Message):
     await message.answer("Привет! Я ИИ-аналитик. Задавай вопросы по базе видео, и я отвечу числом.")
 
-
 @dp.message(F.text)
 async def handle_message(message: types.Message):
     if message.text.startswith("/"): return
@@ -127,21 +184,3 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("Бот остановлен")
 
-
-# @dp.message(F.text)
-# async def handle_message(message: types.Message):
-#     await bot.send_chat_action(chat_id=message.chat.id, action="typing")
-    
-#     try:
-#         sql_query = await sql_from_natural_language(message.text)
-#         print(f"\n--- НОВЫЙ ЗАПРОС ---")
-#         print(f"ВОПРОС: {message.text}")
-#         print(f"SQL ОТ ИИ: {sql_query}")
-#         print(f"--------------------\n")
-
-#         result = await fetch_result(sql_query)
-#         await message.answer(str(result))
-        
-#     except Exception as e:
-#         print(f"Error: {e}")
-#         await message.answer("0")
